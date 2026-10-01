@@ -1,0 +1,28 @@
+# Render Blueprint: New -> Blueprint -> pick this repo. Secrets are asked on first deploy.
+services:
+  - type: web
+    name: telegram-mcp
+    runtime: docker
+    plan: starter            # persistent disk requires a paid plan
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: TELEGRAM_MCP_HOME
+        value: /data
+      - key: MCP_AUTH_TOKEN
+        generateValue: true  # Render generates a random secret; copy it from the dashboard
+      - key: TELEGRAM_CHANNELS
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_SESSION
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

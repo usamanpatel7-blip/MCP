@@ -1,11 +1,12 @@
 [project]
 name = "telegram-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server that lets Claude read Telegram channel posts"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.2",
+    "mcp>=2",
+    "uvicorn>=0.30",
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
     "telethon>=1.36",
@@ -14,6 +15,7 @@ dependencies = [
 [project.scripts]
 telegram-mcp = "telegram_mcp.server:main"
 telegram-mcp-login = "telegram_mcp.login:main"
+telegram-mcp-http = "telegram_mcp.http:main"
 
 [build-system]
 requires = ["hatchling"]
