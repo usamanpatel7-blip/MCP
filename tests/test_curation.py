@@ -35,3 +35,26 @@ def test_split_message():
     parts = split_message("a" * 50 + "\n\n" + "b" * 50, limit=60)
     assert parts == ["a" * 50, "b" * 50]
     assert all(len(p) <= 60 for p in split_message("c" * 200, limit=60))
+
+
+def test_channel_key():
+    for raw in ["@Durov", "https://t.me/s/durov/5", "t.me/durov", "durov"]:
+        assert curation.channel_key(raw) == "durov"
+
+
+def test_relative_views():
+    posts = [{"id": i, "channel": "a", "views": "100"} for i in range(10)]
+    posts[5]["views"] = "500"
+    curation.annotate_relative_views(posts)
+    assert posts[5]["engagement"] == 5.0
+    assert posts[0]["engagement"] == 1.0
+
+
+def test_archive_and_search(tmp_path, monkeypatch):
+    monkeypatch.setattr(curation, "STATE_DIR", tmp_path)
+    curation.save_archive("@a", [{"id": 1, "channel": "a", "text": "Про юнит-экономику и CAC"}])
+    curation.save_archive("a", [{"id": 2, "channel": "a", "text": "Найм первых сотрудников"}])
+    assert len(curation.load_archive("a")) == 2
+    assert [p["id"] for p in curation.search_archives("cac юнит")] == [1]
+    curation.save_notes("a", "notes")
+    assert "notes" in curation.load_notes()

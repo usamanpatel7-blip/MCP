@@ -23,7 +23,10 @@ mcp = MCPServer(
         "with a `since` window; cite posts by their t.me links. Channels listed in "
         "TELEGRAM_CHANNELS are the user's default subscriptions. For the curated "
         "'send me only the best' workflow use the `essence` prompt: get_new_posts -> "
-        "select by get_interest_profile -> send_to_me -> mark_read."
+        "select by get_interest_profile -> send_to_me -> mark_read. To deeply learn "
+        "one author's channel use the `study` prompt (study_channel -> get_post -> "
+        "save_channel_notes). When answering or researching a topic, first check "
+        "get_channel_notes and search_knowledge: they hold the user's studied experts."
     ),
 )
 
@@ -385,6 +388,120 @@ def essence(max_items: str = "5", send: str = "yes") -> str:
 4. If nothing is worth it, write one line: "Сегодня ничего стоящего (просмотрено N постов)".
 5. End with one line: how many posts were reviewed and from which channels.
 6. {deliver} If sending fails, do NOT mark as read."""
+
+
+@mcp.tool()
+@_errors
+async def study_channel(
+    channel: str,
+    since: str = "365d",
+    max_posts: int = 600,
+    top: int = 25,
+    max_chars: int | None = 1500,
+    use_account: bool | None = None,
+) -> str:
+    """Deep-dive into one author's channel: downloads its history (saved locally for
+    later search_knowledge), drops noise, and returns channel stats plus the TOP posts
+    ranked by how much they outperformed neighbouring posts (resonance with the audience).
+
+    Args:
+        channel: The author's channel.
+        since: How far back to read ("90d", "365d", "2026-01-01").
+        max_posts: Cap on posts to download (1-1200).
+        top: How many best posts to return in the result (1-60).
+        max_chars: Truncate each returned post (null = full).
+        use_account: Force account (true) or public web (false) mode.
+    """
+    posts = await _backend(use_account).fetch_posts(
+        channel, limit=max(1, min(max_posts, 1200)), since=parse_since(since)
+    )
+    if not posts:
+        return f"No posts in {channel} for since={since}."
+    path = curation.save_archive(channel, posts)
+    curation.annotate_relative_views(posts)
+    signal = [p for p in posts if not curation.noise_reason(p)]
+    ranked = sorted(signal, key=lambda p: p.get("engagement") or 0, reverse=True)
+    best = ranked[: max(1, min(top, 60))]
+
+    dates = sorted(p["date"] for p in posts if p.get("date"))
+    days = max(1, (datetime.fromisoformat(dates[-1]) - datetime.fromisoformat(dates[0])).days) if dates else 1
+    avg_len = sum(len(p["text"]) for p in signal) // max(1, len(signal))
+    info = [
+        f"Channel {channel}: {len(posts)} posts from {dates[0][:10] if dates else '?'} "
+        f"to {dates[-1][:10] if dates else '?'} (~{len(posts) / days * 7:.1f}/week).",
+        f"Substantive posts: {len(signal)} (avg {avg_len} chars); noise skipped: {len(posts) - len(signal)}.",
+        f"Archive saved: {path} (searchable via search_knowledge).",
+        f"Hit limit max_posts={max_posts}; raise it or narrow `since` for more."
+        if len(posts) >= max_posts else "",
+        f"TOP {len(best)} by resonance (engagement = views vs neighbouring posts):",
+    ]
+    return "\n".join(x for x in info if x) + "\n\n" + render(best, "text", max_chars)
+
+
+@mcp.tool()
+@_errors
+async def search_knowledge(
+    query: str,
+    channels: list[str] | None = None,
+    limit: int = 10,
+    max_chars: int | None = 1200,
+) -> str:
+    """Search the locally saved archives of studied channels (instant, offline).
+    Use it when answering or researching: "what did my experts say about pricing?".
+    All query words must appear in a post; try synonyms and both RU/EN words.
+
+    Args:
+        query: Words to find.
+        channels: Restrict to these channels (default: all studied).
+        limit: Max posts (1-50).
+        max_chars: Truncate each post (null = full).
+    """
+    studied = curation.archived_channels()
+    if not studied:
+        return "Knowledge base is empty: run study_channel on some channels first."
+    hits = curation.search_archives(query, channels)[: max(1, min(limit, 50))]
+    if not hits:
+        return f"No matches for '{query}' in: {', '.join(studied)}. Try fewer or other words."
+    return f"{len(hits)} matches in studied channels.\n\n" + render(hits, "text", max_chars, show_channel=True)
+
+
+@mcp.tool()
+async def save_channel_notes(channel: str, notes: str) -> str:
+    """Save your synthesized study notes about a channel/author (Markdown, replaces old).
+    These notes are the reusable distilled knowledge for future answers."""
+    return f"Saved to {curation.save_notes(channel, notes)}."
+
+
+@mcp.tool()
+async def get_channel_notes(channel: str | None = None) -> str:
+    """Study notes for one channel, or for all studied authors if channel is omitted.
+    Check these before answering questions in the user's professional area."""
+    notes = curation.load_notes(channel)
+    if notes:
+        return notes
+    studied = curation.archived_channels()
+    return ("No notes yet. " + (f"Archived but not summarized: {', '.join(studied)}." if studied
+            else "Use the `study` prompt to study a channel."))
+
+
+@mcp.prompt()
+def study(channel: str, period: str = "365d", goal: str = "") -> str:
+    """Изучить канал автора и вытащить максимум пользы в заметки."""
+    focus = f"The user's goal: {goal}. Prioritize what serves it.\n" if goal else ""
+    return f"""Study the Telegram channel {channel} as a research analyst. {focus}
+1. Call study_channel(channel="{channel}", since="{period}").
+2. Read the full text of the most promising top posts with get_post (at least 10), and use
+   search_channel_posts for recurring themes you notice.
+3. Write notes in the user's language, Markdown, dense and concrete:
+   ## Кто автор и чем ценен — опыт, контекст, на чём основаны его выводы
+   ## Ключевые идеи — 5-10 тезисов, у каждого ссылка на пост
+   ## Фреймворки и методы — как применять, по шагам
+   ## Цифры и кейсы — конкретные метрики, результаты, примеры
+   ## Неочевидное и спорное — где автор идёт против мейнстрима, и где может ошибаться
+   ## Лучшие посты — 10 ссылок с одной строкой «почему читать»
+   ## Как использовать — когда в работе вспоминать этого автора
+   Only claims backed by posts; cite t.me links. No generic filler.
+4. Save with save_channel_notes, then give the user a short summary."""
 
 
 def main() -> None:

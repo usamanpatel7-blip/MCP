@@ -18,7 +18,7 @@ from .errors import UserError
 BASE_URL = "https://t.me/s/"
 USER_AGENT = "Mozilla/5.0 (compatible; telegram-mcp/0.2)"
 CACHE_TTL = 120  # seconds; avoids refetching the same page within one conversation
-MAX_PAGES = 30  # hard stop when paging back through history (~20 posts per page)
+MAX_PAGES = 60  # hard stop when paging back through history (~20 posts per page)
 
 _cache: dict[str, tuple[float, str]] = {}
 
