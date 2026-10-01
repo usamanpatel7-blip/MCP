@@ -14,12 +14,25 @@ MCP-сервер, позволяющий Claude читать посты из Tel
 
 ## Инструменты
 
-- `get_channel_posts(channel, limit=20, before_id=None)` — последние посты (новые первыми); `before_id` для пролистывания назад.
-- `search_channel_posts(channel, query, limit=20)` — поиск по тексту постов.
-- `get_post(channel, post_id)` — один пост (например, из ссылки `https://t.me/durov/545`).
-- `list_my_channels(limit=50, channels_only=True)` — каналы/чаты аккаунта (только режим аккаунта).
+| Инструмент | Зачем |
+|---|---|
+| `get_digest(channels, since="24h")` | «Что нового?» — посты из нескольких каналов за период одним вызовом, отсортированы по времени, с ошибками по каждому каналу отдельно |
+| `get_channel_posts(channel, limit, since, before_id)` | Лента канала; `since` = `24h`, `7d`, `2w` или `2026-09-01` |
+| `search_channel_posts(channel, query)` | Поиск по тексту постов |
+| `get_post(link)` | Полный текст поста по ссылке `https://t.me/durov/545` |
+| `get_channel_info(channel)` | Название, описание, подписчики, дата последнего поста |
+| `list_my_channels()` | Ваши каналы с числом непрочитанных (режим аккаунта) |
 
-`channel` принимает `durov`, `@durov`, `https://t.me/durov` или (в режиме аккаунта) числовой id.
+Промпт `digest` (в Claude Desktop — через меню «+») делает сводку новостей с группировкой по темам и ссылками на посты.
+
+**Экономия контекста:** по умолчанию посты отдаются компактным текстом и обрезаются (`max_chars`, 600 в дайджесте и 1500 в ленте). Полный текст — через `get_post`, все поля — `format="json"`.
+
+**Каналы по умолчанию:** задайте `TELEGRAM_CHANNELS="durov,telegram,..."`, и вопрос «что нового в моих каналах за неделю?» заработает без перечисления каналов.
+
+Примеры запросов к Claude:
+- «Что нового в моих каналах за 3 дня? Сгруппируй по темам»
+- «Найди в @durov всё про TON за последний год»
+- «Перескажи https://t.me/durov/545»
 
 ## Установка
 
@@ -46,14 +59,15 @@ claude mcp add telegram -- /абсолютный/путь/telegram-mcp/.venv/bin
       "env": {
         "TELEGRAM_API_ID": "123456",
         "TELEGRAM_API_HASH": "abcdef...",
-        "TELEGRAM_SESSION": "1Aa..."
+        "TELEGRAM_SESSION": "1Aa...",
+        "TELEGRAM_CHANNELS": "durov,telegram"
       }
     }
   }
 }
 ```
 
-Блок `env` нужен только для режима аккаунта.
+Переменные `TELEGRAM_API_*`/`TELEGRAM_SESSION` нужны только для режима аккаунта; `TELEGRAM_CHANNELS` необязательна.
 
 ## Режим аккаунта
 
