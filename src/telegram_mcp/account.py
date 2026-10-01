@@ -171,3 +171,49 @@ async def channel_info(channel: str) -> dict:
     info["last_post_date"] = last.date.isoformat() if last else None
     info["last_post_id"] = last.id if last else None
     return info
+
+
+async def search_my_chats(query: str, limit: int = 20, since: datetime | None = None,
+                          channels_only: bool = True) -> list[dict]:
+    """Search across all chats/channels the account is subscribed to."""
+    client = await get_client()
+    out = []
+    try:
+        async for m in client.iter_messages(None, search=query, limit=limit * 2):
+            if since and m.date < since:
+                break
+            if channels_only and not m.is_channel:
+                continue
+            if m.message:
+                out.append(_serialize(m, await m.get_chat()))
+            if len(out) >= limit:
+                break
+    except errors.FloodWaitError as e:
+        raise UserError(f"Telegram rate limit: retry in {e.seconds} seconds.") from e
+    return out
+
+
+async def search_public_posts(query: str, limit: int = 20) -> list[dict]:
+    """Telegram's global search over posts of ALL public channels (channels.searchPosts).
+    Telegram limits free queries per day; raises UserError when the quota is spent."""
+    from telethon.tl.functions.channels import SearchPostsRequest
+    from telethon.tl.types import InputPeerEmpty
+
+    client = await get_client()
+    try:
+        res = await client(SearchPostsRequest(
+            offset_rate=0, offset_peer=InputPeerEmpty(), offset_id=0,
+            limit=min(limit, 50), query=query,
+        ))
+    except errors.FloodWaitError as e:
+        raise UserError(f"Telegram rate limit: retry in {e.seconds} seconds.") from e
+    except errors.RPCError as e:
+        raise UserError(f"Global post search unavailable: {e.message} "
+                        "(Telegram limits free global searches per day).") from e
+    chats = {c.id: c for c in res.chats}
+    out = []
+    for m in res.messages:
+        chat = chats.get(getattr(m.peer_id, "channel_id", None))
+        if chat is not None and getattr(m, "message", None):
+            out.append(_serialize(m, chat))
+    return out

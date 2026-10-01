@@ -58,3 +58,11 @@ def test_archive_and_search(tmp_path, monkeypatch):
     assert [p["id"] for p in curation.search_archives("cac юнит")] == [1]
     curation.save_notes("a", "notes")
     assert "notes" in curation.load_notes()
+
+
+def test_search_prefix_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(curation, "STATE_DIR", tmp_path)
+    curation.save_archive("a", [{"id": 1, "channel": "a", "text": "New buttons"},
+                                {"id": 2, "channel": "a", "text": "Про найма продактов и TON"}])
+    assert [p["id"] for p in curation.search_archives("ton")] == [2]
+    assert [p["id"] for p in curation.search_archives("найм")] == [2]

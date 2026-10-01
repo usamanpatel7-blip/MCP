@@ -162,14 +162,17 @@ def archived_channels() -> list[str]:
 
 
 def search_archives(query: str, channels: list[str] | None = None) -> list[dict]:
-    """All words of the query must appear (case-insensitive); ranked by hit count."""
+    """Every query word must start a word in the post (prefix match, so Russian
+    inflections work: 'найм' finds 'найма'); ranked by hit count."""
     words = [w.lower() for w in re.findall(r"\w+", query) if len(w) > 1]
+    patterns = [re.compile(r"\b" + re.escape(w)) for w in words]
     hits = []
     for ch in channels or archived_channels():
         for p in load_archive(ch):
             text = (p.get("text") or "").lower()
-            if words and all(w in text for w in words):
-                hits.append((sum(text.count(w) for w in words), p))
+            counts = [len(pat.findall(text)) for pat in patterns]
+            if patterns and all(counts):
+                hits.append((sum(counts), p))
     hits.sort(key=lambda h: (h[0], h[1].get("date") or ""), reverse=True)
     return [p for _, p in hits]
 

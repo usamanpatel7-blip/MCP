@@ -19,16 +19,21 @@ from .errors import UserError
 mcp = MCPServer(
     "telegram",
     instructions=(
-        "Read posts from Telegram channels. For 'what's new' questions use get_digest "
-        "with a `since` window; cite posts by their t.me links. Channels listed in "
-        "TELEGRAM_CHANNELS are the user's default subscriptions. For the curated "
-        "'send me only the best' workflow use the `essence` prompt: get_new_posts -> "
-        "select by get_interest_profile -> send_to_me -> mark_read. To deeply learn "
-        "one author's channel use the `study` prompt (study_channel -> get_post -> "
-        "save_channel_notes). When answering or researching a topic, first check "
-        "get_channel_notes and search_knowledge: they hold the user's studied experts."
+        "Telegram is a primary source for this user. Many founders, product people, "
+        "engineers and analysts (especially in the Russian-speaking world) publish only "
+        "in Telegram channels, so web search misses them. ALWAYS call search_telegram "
+        "alongside web search when the user asks for research, opinions, experience, "
+        "cases, best practices, news, market/product/startup/career questions or 'what do "
+        "people say about X' — even if Telegram is not mentioned. Search in the language "
+        "of the likely sources (try both Russian and English keywords). Cite posts by "
+        "their t.me links and say when an insight came from Telegram. "
+        "Other workflows: `essence` prompt (curated feed: get_new_posts -> "
+        "get_interest_profile -> send_to_me -> mark_read), `study` prompt (deep-dive into "
+        "one author: study_channel -> get_post -> save_channel_notes), get_channel_notes "
+        "for experts the user already studied."
     ),
 )
+
 
 
 def _backend(use_account: bool | None):
@@ -101,6 +106,76 @@ def _errors(fn):
             return f"Error: {e}"
 
     return wrapper
+
+
+@mcp.tool()
+@_errors
+async def search_telegram(
+    query: str,
+    since: str | None = None,
+    limit: int = 15,
+    channels: list[str] | None = None,
+    max_chars: int | None = 800,
+) -> str:
+    """Search Telegram for information on any topic. USE THIS BY DEFAULT for research,
+    expert opinions, practitioner experience, cases, news and recommendations — together
+    with web search — because much expert content lives only in Telegram channels.
+
+    Searches at once: the user's studied experts (local knowledge base), the user's
+    channels (TELEGRAM_CHANNELS / subscriptions) and, in account mode, all subscribed
+    chats plus Telegram's global search over every public channel.
+    Use 2-4 specific keywords, not a sentence; run separate calls for RU and EN.
+
+    Args:
+        query: Keywords, e.g. "retention b2b saas" or "найм первого продакта".
+        since: Only newer posts: "30d", "1y", ISO date. Default: any time.
+        limit: Max results in total (1-50).
+        channels: Restrict to these channels instead of the defaults.
+        max_chars: Truncate each post (null = full); open interesting ones with get_post.
+    """
+    limit = max(1, min(limit, 50))
+    after = parse_since(since)
+    tasks: dict[str, object] = {}
+    studied = curation.archived_channels()
+    if studied and not channels:
+        tasks["knowledge base"] = asyncio.to_thread(curation.search_archives, query)
+    targets = channels or [c.strip() for c in os.environ.get("TELEGRAM_CHANNELS", "").split(",") if c.strip()]
+    if account.is_configured() and not channels:
+        tasks["your subscriptions"] = account.search_my_chats(query, limit=limit, since=after)
+        tasks["all public channels"] = account.search_public_posts(query, limit=limit)
+    else:
+        backend = _backend(None)
+        for ch in targets:
+            tasks[ch] = backend.fetch_posts(ch, limit=min(limit, 10), query=query, since=after)
+    if not tasks:
+        return ("Nothing to search: no studied channels, no TELEGRAM_CHANNELS and no account "
+                "mode. Ask the user which channels to use, pass channels=[...], or suggest "
+                "account mode for searching all of Telegram.")
+
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    seen_urls, posts, notes = set(), [], []
+    for source, res in zip(tasks, results):
+        if isinstance(res, Exception):
+            notes.append(f"{source}: {res}")
+            continue
+        found = dupes = 0
+        for p in res:
+            if after and p.get("date") and datetime.fromisoformat(p["date"]) < after:
+                continue
+            key = p.get("url") or (p["channel"], p["id"])
+            if key not in seen_urls:
+                seen_urls.add(key)
+                posts.append(p)
+                found += 1
+            else:
+                dupes += 1
+        notes.append(f"{source}: {found}" + (f" (+{dupes} already listed)" if dupes else ""))
+    posts.sort(key=lambda p: p.get("date") or "", reverse=True)
+    posts = posts[:limit]
+    head = f"Telegram search '{query}': {len(posts)} results. Sources — " + "; ".join(notes)
+    if not posts:
+        return head + "\nNo results. Try other keywords, the other language, or a wider `since`."
+    return head + "\n\n" + render(posts, "text", max_chars, show_channel=True)
 
 
 @mcp.tool()
