@@ -13,7 +13,7 @@ try:  # mcp >= 2
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer
 
-from . import account, public
+from . import account, curation, delivery, public
 from .errors import UserError
 
 mcp = MCPServer(
@@ -21,7 +21,9 @@ mcp = MCPServer(
     instructions=(
         "Read posts from Telegram channels. For 'what's new' questions use get_digest "
         "with a `since` window; cite posts by their t.me links. Channels listed in "
-        "TELEGRAM_CHANNELS are the user's default subscriptions."
+        "TELEGRAM_CHANNELS are the user's default subscriptions. For the curated "
+        "'send me only the best' workflow use the `essence` prompt: get_new_posts -> "
+        "select by get_interest_profile -> send_to_me -> mark_read."
     ),
 )
 
@@ -62,6 +64,8 @@ def format_post(p: dict, max_chars: int | None = None, show_channel: bool = Fals
         head.append(f"{p['views']} views")
     if p.get("media"):
         head.append("+" + ",".join(p["media"]))
+    if p.get("engagement"):
+        head.append(f"engagement x{p['engagement']}")
     if p.get("forwarded_from"):
         head.append(f"fwd from {p['forwarded_from']}")
     text = p.get("text") or "(no text)"
@@ -246,6 +250,141 @@ def digest(channels: str = "", period: str = "24h") -> str:
         "merge duplicates across channels, put the most important first, and cite every "
         "item with its t.me link. Answer in the user's language."
     )
+
+
+def _default_channels(channels: list[str] | None) -> list[str]:
+    if channels:
+        return channels
+    chans = [c.strip() for c in os.environ.get("TELEGRAM_CHANNELS", "").split(",") if c.strip()]
+    if not chans:
+        raise UserError("No channels given and TELEGRAM_CHANNELS is not set. "
+                        "Pass channels=[...] or ask the user which channels to follow.")
+    return chans
+
+
+@mcp.tool()
+@_errors
+async def get_new_posts(
+    channels: list[str] | None = None,
+    first_run_since: str = "3d",
+    filter_noise: bool = True,
+    per_channel_limit: int = 50,
+    max_chars: int | None = 2500,
+    use_account: bool | None = None,
+) -> str:
+    """Posts the user has NOT been shown yet (since the last mark_read), across channels.
+    Built for the curated feed: obvious noise (ads, giveaways, short or bare-repost posts)
+    is dropped, and each post gets `engagement` = views vs the channel's median.
+    After delivering the selection, call mark_read with the returned cursor.
+
+    Args:
+        channels: Channels to check. Defaults to TELEGRAM_CHANNELS.
+        first_run_since: Window for channels never read before ("3d", "1w", ...).
+        filter_noise: Drop ads/short posts/bare reposts before returning.
+        per_channel_limit: Max new posts per channel (1-200).
+        max_chars: Truncate each post (null = full). Keep large: judging needs the text.
+        use_account: Force account (true) or public web (false) mode.
+    """
+    channels = _default_channels(channels)
+    seen = curation.load_seen()
+    backend = _backend(use_account)
+    first_since = parse_since(first_run_since)
+    limit = max(1, min(per_channel_limit, 200))
+
+    async def fetch(ch):
+        last = seen.get(curation.channel_key(ch))
+        posts = await backend.fetch_posts(ch, limit=limit, since=None if last else first_since)
+        return [p for p in posts if not last or p["id"] > last]
+
+    results = await asyncio.gather(*(fetch(c) for c in channels), return_exceptions=True)
+    posts, problems, cursor, dropped = [], [], {}, {}
+    for ch, res in zip(channels, results):
+        if isinstance(res, Exception):
+            problems.append(f"{ch}: {res}")
+            continue
+        if res:
+            cursor[curation.channel_key(ch)] = max(p["id"] for p in res)
+        posts.extend(res)
+    curation.annotate_engagement(posts)
+    if filter_noise:
+        kept = []
+        for p in posts:
+            reason = curation.noise_reason(p)
+            if reason:
+                dropped[reason] = dropped.get(reason, 0) + 1
+            else:
+                kept.append(p)
+        posts = kept
+    posts.sort(key=lambda p: p["date"] or "", reverse=True)
+
+    lines = [f"{len(posts)} new posts from {len(channels)} channels."]
+    if dropped:
+        lines.append("Filtered out as noise: " + ", ".join(f"{k}: {v}" for k, v in dropped.items()))
+    if problems:
+        lines.append("Problems:\n" + "\n".join(f"- {x}" for x in problems))
+    lines.append("cursor (pass to mark_read after delivering): " + json.dumps(cursor))
+    if posts:
+        lines.append(render(posts, "text", max_chars, show_channel=True))
+    return "\n\n".join(lines)
+
+
+@mcp.tool()
+@_errors
+async def mark_read(cursor: dict[str, int]) -> str:
+    """Remember posts as seen so get_new_posts won't return them again.
+    Pass the cursor dict from get_new_posts, e.g. {"durov": 548}."""
+    seen = curation.load_seen()
+    for ch, post_id in cursor.items():
+        key = curation.channel_key(ch)
+        seen[key] = max(seen.get(key, 0), int(post_id))
+    curation.save_seen(seen)
+    return f"Marked as read: {', '.join(f'{k} up to #{v}' for k, v in cursor.items()) or 'nothing'}."
+
+
+@mcp.tool()
+@_errors
+async def send_to_me(text: str) -> str:
+    """Send a message to the user in Telegram (their bot chat, or Saved Messages in
+    account mode). Long text is split automatically. Plain text; links stay clickable."""
+    return await delivery.send(text)
+
+
+@mcp.tool()
+async def get_interest_profile() -> str:
+    """What the user finds valuable vs noise. Use it to select posts for the curated feed."""
+    return curation.load_profile()
+
+
+@mcp.tool()
+async def set_interest_profile(profile: str) -> str:
+    """Save the user's interest profile (replace the whole text). Update it when the user
+    says what they liked or didn't ("больше про юнит-экономику, меньше про AI-хайп")."""
+    return f"Saved to {curation.save_profile(profile)}."
+
+
+@mcp.prompt()
+def essence(max_items: str = "5", send: str = "yes") -> str:
+    """Отобрать «мякотку» из новых постов экспертов и прислать в Telegram."""
+    deliver = (
+        "Send the result with send_to_me, then call mark_read with the cursor."
+        if send.lower() in ("yes", "да", "true", "1")
+        else "Show the result here, then call mark_read with the cursor."
+    )
+    return f"""You are the user's personal editor for Telegram channels of founders and practitioners.
+
+1. Call get_interest_profile, then get_new_posts.
+2. Pick at most {max_items} posts that are genuinely valuable under the profile. Be strict:
+   most days only 0-3 posts deserve attention. Engagement is a hint, not a criterion.
+   Merge posts that say the same thing.
+3. For each pick write in the user's language:
+   plain text, like this:
+   • Короткий заголовок — автор/канал
+   Суть: 2-3 предложения с конкретикой (цифры, шаги, вывод), а не пересказ темы.
+   Зачем мне: одна строка, как применить.
+   https://t.me/...
+4. If nothing is worth it, write one line: "Сегодня ничего стоящего (просмотрено N постов)".
+5. End with one line: how many posts were reviewed and from which channels.
+6. {deliver} If sending fails, do NOT mark as read."""
 
 
 def main() -> None:
